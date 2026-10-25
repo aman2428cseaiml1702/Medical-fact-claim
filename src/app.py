@@ -62,10 +62,19 @@ def get_live_rag_engine():
         _live_rag_engine = ExternalHealthcareRAGEngine()
     return _live_rag_engine
 
-def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_source: str = "", top_url: str = "", top_title: str = "", claim: str = "", retrieval_mode: str = "", top_domain: str = "") -> str:
+def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_source: str = "", top_url: str = "", top_title: str = "", claim: str = "", retrieval_mode: str = "", top_domain: str = "", winning_api: str = "", top_score: float = 0.0) -> str:
     """Generates a high-impact, visual status banner with direct article link buttons and claim details."""
     is_live_mode = "Live" in retrieval_mode
     domain_label = f" ({top_domain})" if top_domain else ""
+    winning_api_label = winning_api or top_source
+    score_display = f"{top_score:.4f}" if isinstance(top_score, (float, int)) and top_score > 0 else str(top_score)
+    winning_api_badge = (
+        f"""<div style='margin-top: 10px; background: rgba(0,0,0,0.25); padding: 8px 14px; border-radius: 8px; font-size: 13px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px;'>
+            <div>🏆 <strong>Winning External API:</strong> <span style='background: #38bdf8; color: #0f172a; padding: 2px 8px; border-radius: 4px; font-weight: 700;'>{winning_api_label}</span></div>
+            <div>🎯 <strong>Highest Cosine Similarity:</strong> <code style='background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px; font-weight: 700;'>{score_display}</code> <em>(Selected to Answer)</em></div>
+        </div>"""
+        if is_live_mode and winning_api_label else ""
+    )
     mode_badge = (
         "<div style='font-size: 12px; margin-top: 8px; background: rgba(0,0,0,0.22); padding: 7px 12px; border-radius: 8px; border-left: 3px solid #38bdf8;'>"
         "🌐 <strong>Live Real-Time Retrieval Mode Active:</strong> Verified exclusively via live external APIs (Google Fact Check Tools, PubMed Central, Europe PMC, ClinicalTrials.gov, WHO).<br/>"
@@ -112,6 +121,8 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
                 <span>•</span>
                 <span>🏛️ RAG Source: <strong>{top_source}</strong></span>
             </div>
+            {winning_api_badge}
+            {mode_badge}
             {article_link_btn}
         </div>
         """
@@ -131,6 +142,8 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
                 <span>•</span>
                 <span>🧑‍⚕️ Evaluated by: <strong>{top_author}</strong></span>
             </div>
+            {winning_api_badge}
+            {mode_badge}
             {article_link_btn}
         </div>
         """
@@ -152,6 +165,8 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
                 <span>•</span>
                 <span>🏛️ RAG Source: <strong>{top_source}</strong></span>
             </div>
+            {winning_api_badge}
+            {mode_badge}
             {article_link_btn}
         </div>
         """
@@ -171,6 +186,8 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
                 <span>•</span>
                 <span>🧑‍⚕️ Evaluated by: <strong>{top_author or 'Clinical RAG Engine'}</strong></span>
             </div>
+            {winning_api_badge}
+            {mode_badge}
             {article_link_btn}
         </div>
         """
@@ -322,6 +339,10 @@ def verify_claim(claim: str, mode: str = "Curated Medical & Hinglish Dataset (4,
         except Exception:
             top_domain = ""
 
+    winning_api_name = top_item.get("winning_api_name", top_source)
+    winning_api_score = top_item.get("winning_api_score", top_item.get("similarity_score", 0.0))
+    api_leaderboard = top_item.get("api_leaderboard", [])
+
     banner_html = generate_verdict_banner(
         verdict_data["verdict"],
         verdict_data["risk"],
@@ -331,7 +352,9 @@ def verify_claim(claim: str, mode: str = "Curated Medical & Hinglish Dataset (4,
         top_title=top_title,
         claim=claim,
         retrieval_mode=mode,
-        top_domain=top_domain
+        top_domain=top_domain,
+        winning_api=winning_api_name,
+        top_score=winning_api_score
     )
 
     # ── Format Evidence Markdown with full abstracts in apostrophes ──────────
@@ -340,22 +363,64 @@ def verify_claim(claim: str, mode: str = "Curated Medical & Hinglish Dataset (4,
 
     if is_live:
         evidence_md += (
-            "### 🌐 Live External Evidence Sources (Fetched in Real-Time)\n"
-            "> ⚡ **100% External Retrieval**: All evidence below was dynamically retrieved in real-time from external APIs (**Google Fact Check Tools**, **NCBI PubMed Central**, **Europe PMC**, **ClinicalTrials.gov**, **WHO**). The local 4,946 clinical dataset was **NOT used**.\n\n"
-            "| # | External Source Platform | Official Article / Investigation Title | Scientific Stance | Direct Source Article Link |\n"
-            "|:---:|---|---|:---:|---|\n"
+            f"### 🏆 External API Cosine Similarity Comparison (Tournament Selection)\n"
+            f"> 🎯 **Selection Rule**: Each candidate external API was queried in real-time. We calculated the exact cosine similarity between your input claim and every retrieved candidate article. The API whose article scored the **highest cosine similarity** — **{winning_api_name}** (`{winning_api_score}`) — was chosen to answer and verify this claim.\n\n"
         )
-        for i, itm in enumerate(retrieved, start=1):
-            src_name = itm.get("source", "External Medical API")
-            title_clean = itm.get("article_title", itm.get("claim_topic", "Clinical Investigation")).replace("|", "-")
-            url_clean = itm.get("url", "#")
-            stance_clean = f"`{itm.get('stance', 'N/A').upper()}`"
-            dom = itm.get("origin_domain") or (urllib.parse.urlparse(url_clean).netloc.replace("www.", "") if url_clean != "#" else "source")
-            evidence_md += f"| {i} | {src_name} | {title_clean} | {stance_clean} | [🔗 View on {dom} ↗]({url_clean}) |\n"
-        evidence_md += "\n---\n\n"
+        if api_leaderboard:
+            evidence_md += (
+                "| Rank | External API Platform | Best Cosine Similarity | Selection Status | Top Candidate Article |\n"
+                "|:---:|---|:---:|:---:|---|\n"
+            )
+            for idx, entry in enumerate(api_leaderboard, start=1):
+                api_n = entry.get("api_name", "API")
+                score_val = entry.get("best_score", 0.0)
+                top_t = entry.get("top_title", "Article")[:65].replace("|", "-")
+                top_u = entry.get("top_url", "#")
+                if idx == 1:
+                    status_badge = "🏆 **SELECTED TO ANSWER**"
+                    rank_badge = "🥇 **1**"
+                    api_label = f"**{api_n}**"
+                    score_label = f"**`{score_val}`**"
+                elif idx == 2:
+                    status_badge = "*Evaluated (Runner-up)*"
+                    rank_badge = "🥈 2"
+                    api_label = api_n
+                    score_label = f"`{score_val}`"
+                elif idx == 3:
+                    status_badge = "*Evaluated*"
+                    rank_badge = "🥉 3"
+                    api_label = api_n
+                    score_label = f"`{score_val}`"
+                else:
+                    status_badge = "*Evaluated*"
+                    rank_badge = f"{idx}"
+                    api_label = api_n
+                    score_label = f"`{score_val}`"
 
-    # ── TOP RESULT HIGHLIGHT CARD ────────────────────────────────────────────
+                evidence_md += f"| {rank_badge} | {api_label} | {score_label} | {status_badge} | [{top_t}]({top_u}) |\n"
+            evidence_md += "\n---\n\n"
+        else:
+            evidence_md += (
+                "| # | External Source Platform | Official Article / Investigation Title | Scientific Stance | Direct Source Article Link |\n"
+                "|:---:|---|---|:---:|---|\n"
+            )
+            for i, itm in enumerate(retrieved, start=1):
+                src_name = itm.get("source", "External Medical API")
+                title_clean = itm.get("article_title", itm.get("claim_topic", "Clinical Investigation")).replace("|", "-")
+                url_clean = itm.get("url", "#")
+                stance_clean = f"`{itm.get('stance', 'N/A').upper()}`"
+                dom = itm.get("origin_domain") or (urllib.parse.urlparse(url_clean).netloc.replace("www.", "") if url_clean != "#" else "source")
+                evidence_md += f"| {i} | {src_name} | {title_clean} | {stance_clean} | [🔗 View on {dom} ↗]({url_clean}) |\n"
+            evidence_md += "\n---\n\n"
+
+    # ── TOP RESULT HIGHLIGHT CARD (WINNING API SOURCE ARTICLE) ───────────────
     abstract_quoted = _quote_abstract(top_full_abstract)
+    if is_live:
+        evidence_md += (
+            f"### 📄 Official Source Article (Selected from Winning API: {winning_api_name} | Cosine Match: {winning_api_score})\n"
+            f"> 🏛️ **Winning API Provider**: `{winning_api_name}` (Highest Cosine Similarity)\n"
+            f"> 🔗 **Direct Official Article Link**: [{top_title}]({top_url})\n\n"
+        )
 
     if verdict_data["verdict"] == "Supported":
         evidence_md += (

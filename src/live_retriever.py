@@ -452,6 +452,45 @@ def fetch_who_evidence(query: str) -> List[Dict[str, Any]]:
     return records
 
 
+def fetch_live_clinical_evidence_by_api(query: str, max_articles: int = 4, **kwargs) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Queries external medical and fact-checking APIs separately and groups results by API.
+    Enables the RAG engine to compute cosine similarity per API and select the single best-matching
+    API to answer the claim.
+    """
+    max_k = kwargs.get("max_results", max_articles)
+    api_candidates = {}
+
+    google_api_key = kwargs.get("google_api_key") or kwargs.get("api_key")
+    language_code = kwargs.get("language_code") or kwargs.get("lang")
+    factcheck_items = fetch_google_factcheck_evidence(
+        query,
+        api_key=google_api_key,
+        language_code=language_code,
+        max_results=min(4, max_k)
+    )
+    if factcheck_items:
+        api_candidates["Google Fact Check Tools"] = factcheck_items
+
+    pubmed_items = fetch_pubmed_evidence(query, max_results=max_k)
+    if pubmed_items:
+        api_candidates["NCBI PubMed Central"] = pubmed_items
+
+    europe_items = fetch_europe_pmc_evidence(query, max_results=min(3, max_k))
+    if europe_items:
+        api_candidates["Europe PMC"] = europe_items
+
+    trial_items = fetch_clinical_trials_evidence(query, max_results=2)
+    if trial_items:
+        api_candidates["ClinicalTrials.gov"] = trial_items
+
+    who_items = fetch_who_evidence(query)
+    if who_items:
+        api_candidates["World Health Organization (WHO)"] = who_items
+
+    return api_candidates
+
+
 def fetch_live_clinical_evidence(query: str, max_articles: int = 4, **kwargs) -> List[Dict[str, Any]]:
     """
     Aggregates live clinical evidence ONLY from authoritative, trusted medical sources.

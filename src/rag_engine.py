@@ -27,10 +27,10 @@ from sentence_transformers import SentenceTransformer
 
 try:
     from src.preprocessing import preprocess_text
-    from src.live_retriever import fetch_live_clinical_evidence
+    from src.live_retriever import fetch_live_clinical_evidence, fetch_live_clinical_evidence_by_api
 except ModuleNotFoundError:
     from preprocessing import preprocess_text
-    from live_retriever import fetch_live_clinical_evidence
+    from live_retriever import fetch_live_clinical_evidence, fetch_live_clinical_evidence_by_api
 
 
 class NumpyIndexFlatIP:
@@ -248,7 +248,13 @@ class HealthcareRAGEngine:
 
 
 class ExternalHealthcareRAGEngine:
-    """Live-only RAG engine. It never loads, indexes, or searches the local evidence dataset."""
+    """
+    Live-only RAG engine. It never loads, indexes, or searches the local evidence dataset.
+    Queries external medical & fact-checking APIs (Google Fact Check, PubMed, Europe PMC,
+    ClinicalTrials, WHO), calculates the pure cosine similarity between the input claim
+    and each API's articles, and selects the single API with the HIGHEST cosine similarity
+    to proceed and answer the claim.
+    """
 
     def __init__(self, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -256,11 +262,16 @@ class ExternalHealthcareRAGEngine:
 
     @staticmethod
     def _infer_stance(item: dict) -> str:
+        # Check if already established
+        existing = item.get("stance", "").strip().lower()
+        if existing in ["supports", "refutes", "uncertain"]:
+            return existing
+
         text = " ".join([
             item.get("evidence_text", ""), item.get("claim_topic", ""),
             item.get("clinical_explanation", ""),
         ]).lower()
-        if any(term in text for term in ("ineffective", "no effect", "harmful", "toxic", "does not cure", "does not treat", "does not prevent")):
+        if any(term in text for term in ("ineffective", "no effect", "harmful", "toxic", "does not cure", "does not treat", "does not prevent", "false", "misleading")):
             return "refutes"
         if any(term in text for term in ("unproven", "insufficient evidence", "not proven", "inconclusive", "unclear", "further research", "limited evidence", "conflicting evidence")):
             return "uncertain"
@@ -270,25 +281,87 @@ class ExternalHealthcareRAGEngine:
 
     def retrieve_live_evidence(self, claim: str, top_k: int = 3, google_api_key: str = None, language_code: str = None):
         cleaned_claim = preprocess_text(claim)
-        articles = fetch_live_clinical_evidence(cleaned_claim, max_articles=top_k, google_api_key=google_api_key, language_code=language_code)
-        if not articles:
+        api_candidates = fetch_live_clinical_evidence_by_api(
+            cleaned_claim,
+            max_articles=top_k,
+            google_api_key=google_api_key,
+            language_code=language_code
+        )
+        if not api_candidates:
             return []
 
-        texts = [item.get("evidence_text", "") for item in articles]
-        embeddings = np.asarray(self.model.encode(texts, normalize_embeddings=True, show_progress_bar=False, device=self.device), dtype=np.float32)
-        query_embedding = np.asarray(self.model.encode([cleaned_claim], normalize_embeddings=True, show_progress_bar=False, device=self.device), dtype=np.float32)[0]
-        scores = np.dot(embeddings, query_embedding)
+        query_embedding = np.asarray(
+            self.model.encode([cleaned_claim], normalize_embeddings=True, show_progress_bar=False, device=self.device),
+            dtype=np.float32
+        )[0]
+
+        # Score each candidate API individually via pure cosine similarity to the claim
+        api_scores = {}
+        scored_by_api = {}
+        for api_name, articles in api_candidates.items():
+            if not articles:
+                continue
+            texts = [item.get("evidence_text", "") for item in articles]
+            embs = np.asarray(
+                self.model.encode(texts, normalize_embeddings=True, show_progress_bar=False, device=self.device),
+                dtype=np.float32
+            )
+            cosine_sims = np.dot(embs, query_embedding)
+
+            scored_items = []
+            for item, sim in zip(articles, cosine_sims):
+                res = dict(item)
+                sim_float = float(round(float(sim), 4))
+                res["similarity_score"] = sim_float
+                res["cosine_similarity"] = sim_float
+                res["source_api"] = api_name
+                if res.get("stance") not in {"supports", "refutes", "uncertain"}:
+                    res["stance"] = self._infer_stance(res)
+                scored_items.append(res)
+
+            scored_items.sort(key=lambda x: x["similarity_score"], reverse=True)
+            scored_by_api[api_name] = scored_items
+            api_scores[api_name] = scored_items[0]["similarity_score"]
+
+        if not api_scores:
+            return []
+
+        # ── TOURNAMENT SELECTION: Pick the API with the HIGHEST cosine similarity ──
+        api_leaderboard = [
+            {
+                "api_name": name,
+                "best_score": score,
+                "top_title": scored_by_api[name][0].get("article_title", ""),
+                "top_url": scored_by_api[name][0].get("url", ""),
+                "article_count": len(scored_by_api[name])
+            }
+            for name, score in sorted(api_scores.items(), key=lambda x: x[1], reverse=True)
+        ]
+
+        winning_api_name = api_leaderboard[0]["api_name"]
+        winning_api_score = api_leaderboard[0]["best_score"]
+
+        # The winning API proceeds! Its articles are the official answering evidence.
+        winning_articles = scored_by_api[winning_api_name]
 
         results = []
-        for item, semantic_score in zip(articles, scores):
-            result = dict(item)
-            result["semantic_similarity_score"] = float(round(float(semantic_score), 4))
-            result["similarity_score"] = float(round(float(semantic_score) + float(result.get("correlation_score", 0.0)), 4))
-            if result.get("stance") not in {"supports", "refutes", "uncertain"}:
-                result["stance"] = self._infer_stance(result)
-            results.append(result)
-
-        results.sort(key=lambda item: item["similarity_score"], reverse=True)
-        for rank, item in enumerate(results[:top_k], start=1):
+        for rank, item in enumerate(winning_articles[:top_k], start=1):
             item["rank"] = rank
-        return results[:top_k]
+            item["is_winning_api"] = True
+            item["winning_api_name"] = winning_api_name
+            item["winning_api_score"] = winning_api_score
+            item["api_leaderboard"] = api_leaderboard
+            results.append(item)
+
+        # Include other APIs' top items for comparison
+        for entry in api_leaderboard[1:]:
+            other_name = entry["api_name"]
+            top_runner_up = dict(scored_by_api[other_name][0])
+            top_runner_up["rank"] = len(results) + 1
+            top_runner_up["is_winning_api"] = False
+            top_runner_up["winning_api_name"] = winning_api_name
+            top_runner_up["winning_api_score"] = winning_api_score
+            top_runner_up["api_leaderboard"] = api_leaderboard
+            results.append(top_runner_up)
+
+        return results
