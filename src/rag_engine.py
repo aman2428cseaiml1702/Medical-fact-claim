@@ -4,6 +4,8 @@ Handles multilingual embeddings generation via SentenceTransformer and
 dense vector search using FAISS.
 """
 
+import re
+
 import os
 import sys
 
@@ -130,6 +132,38 @@ class HealthcareRAGEngine:
         self.index = create_vector_index(dimension)
         self.index.add(embeddings)
 
+    # ── Sentence-level relevant excerpt extraction ──────────────────────────
+    def _extract_relevant_sentences(self, query_embedding: np.ndarray, text: str, top_n: int = 3, min_len: int = 30) -> list:
+        """
+        Splits *text* into individual sentences, encodes each one, computes
+        cosine similarity against *query_embedding*, and returns the *top_n*
+        most relevant sentences together with their similarity scores.
+
+        Returns a list of dicts: [{"sentence": str, "score": float}, ...]
+        """
+        if not text or len(text.strip()) < min_len:
+            return []
+
+        raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        sentences = [s.strip() for s in raw_sentences if len(s.strip()) >= min_len]
+        if not sentences:
+            return []
+
+        sent_embeddings = np.asarray(
+            self.model.encode(sentences, normalize_embeddings=True, show_progress_bar=False, device=self.device),
+            dtype=np.float32
+        )
+        cosine_sims = np.dot(sent_embeddings, query_embedding)
+
+        ranked_indices = np.argsort(cosine_sims)[::-1][:top_n]
+        results = []
+        for idx in ranked_indices:
+            results.append({
+                "sentence": sentences[idx],
+                "score": float(round(float(cosine_sims[idx]), 4))
+            })
+        return results
+
     def retrieve_evidence(self, claim: str, top_k: int = 3):
         """
         Retrieves top_k closest evidence snippets for the given claim from local dataset.
@@ -151,6 +185,11 @@ class HealthcareRAGEngine:
             row = self.df.iloc[idx].to_dict()
             row["similarity_score"] = float(round(float(score), 4))
             row["rank"] = rank + 1
+
+            # Extract the most relevant sentences from the evidence text
+            full_text = row.get("evidence_text", "")
+            relevant_sents = self._extract_relevant_sentences(query_vector[0], full_text, top_n=3)
+            row["relevant_excerpt"] = relevant_sents
             results.append(row)
 
         return results
@@ -260,6 +299,42 @@ class ExternalHealthcareRAGEngine:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = SentenceTransformer(model_name, device=self.device)
 
+    # ── Sentence-level relevant excerpt extraction ──────────────────────────
+    def _extract_relevant_sentences(self, query_embedding: np.ndarray, text: str, top_n: int = 3, min_len: int = 30) -> list:
+        """
+        Splits *text* into individual sentences, encodes each one, computes
+        cosine similarity against *query_embedding*, and returns the *top_n*
+        most relevant sentences together with their similarity scores.
+
+        Returns a list of dicts: [{"sentence": str, "score": float}, ...]
+        """
+        if not text or len(text.strip()) < min_len:
+            return []
+
+        # Split on sentence-ending punctuation while keeping the delimiter
+        raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        # Filter out very short fragments (headings, stray words)
+        sentences = [s.strip() for s in raw_sentences if len(s.strip()) >= min_len]
+        if not sentences:
+            return []
+
+        # Encode every sentence with the same multilingual model
+        sent_embeddings = np.asarray(
+            self.model.encode(sentences, normalize_embeddings=True, show_progress_bar=False, device=self.device),
+            dtype=np.float32
+        )
+        cosine_sims = np.dot(sent_embeddings, query_embedding)
+
+        # Rank and pick top_n
+        ranked_indices = np.argsort(cosine_sims)[::-1][:top_n]
+        results = []
+        for idx in ranked_indices:
+            results.append({
+                "sentence": sentences[idx],
+                "score": float(round(float(cosine_sims[idx]), 4))
+            })
+        return results
+
     @staticmethod
     def _infer_stance(item: dict) -> str:
         # Check if already established
@@ -341,7 +416,8 @@ class ExternalHealthcareRAGEngine:
         winning_api_name = api_leaderboard[0]["api_name"]
         winning_api_score = api_leaderboard[0]["best_score"]
 
-        # The winning API proceeds! Its articles are the official answering evidence.
+        # The winning API proceeds! Strictly filter down to ONLY the winning API's articles.
+        # Exclude all other APIs completely based on real-time cosine similarity.
         winning_articles = scored_by_api[winning_api_name]
 
         results = []
@@ -351,17 +427,12 @@ class ExternalHealthcareRAGEngine:
             item["winning_api_name"] = winning_api_name
             item["winning_api_score"] = winning_api_score
             item["api_leaderboard"] = api_leaderboard
-            results.append(item)
 
-        # Include other APIs' top items for comparison
-        for entry in api_leaderboard[1:]:
-            other_name = entry["api_name"]
-            top_runner_up = dict(scored_by_api[other_name][0])
-            top_runner_up["rank"] = len(results) + 1
-            top_runner_up["is_winning_api"] = False
-            top_runner_up["winning_api_name"] = winning_api_name
-            top_runner_up["winning_api_score"] = winning_api_score
-            top_runner_up["api_leaderboard"] = api_leaderboard
-            results.append(top_runner_up)
+            # ── Extract the exact sentences from this article that are most
+            #    relevant to the claim (sentence-level cosine similarity) ──
+            full_text = item.get("full_abstract", item.get("evidence_text", ""))
+            relevant_sents = self._extract_relevant_sentences(query_embedding, full_text, top_n=3)
+            item["relevant_excerpt"] = relevant_sents
+            results.append(item)
 
         return results

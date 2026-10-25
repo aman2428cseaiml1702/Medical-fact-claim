@@ -363,64 +363,45 @@ def verify_claim(claim: str, mode: str = "Curated Medical & Hinglish Dataset (4,
 
     if is_live:
         evidence_md += (
-            f"### 🏆 External API Cosine Similarity Comparison (Tournament Selection)\n"
-            f"> 🎯 **Selection Rule**: Each candidate external API was queried in real-time. We calculated the exact cosine similarity between your input claim and every retrieved candidate article. The API whose article scored the **highest cosine similarity** — **{winning_api_name}** (`{winning_api_score}`) — was chosen to answer and verify this claim.\n\n"
+            f"### 🏆 Selected External API: {winning_api_name}\n"
+            f"> 🎯 **Real-Time Dynamic Selection**: Evaluated against candidate medical APIs at runtime. **{winning_api_name}** achieved the **highest cosine similarity (`{winning_api_score}`)** to your input claim. All other APIs were excluded, and this verification is derived exclusively from this API.\n\n"
+            f"| Metric | Details |\n"
+            f"|---|---|\n"
+            f"| **Selected Winning API** | 🏛️ **`{winning_api_name}`** |\n"
+            f"| **Highest Cosine Similarity** | 🎯 **`{winning_api_score}`** |\n"
+            f"| **Primary Source Article** | 📄 [{top_title}]({top_url}) |\n"
+            f"| **Direct Official Link** | 🔗 [{top_url}]({top_url}) |\n\n"
+            f"---\n\n"
         )
-        if api_leaderboard:
-            evidence_md += (
-                "| Rank | External API Platform | Best Cosine Similarity | Selection Status | Top Candidate Article |\n"
-                "|:---:|---|:---:|:---:|---|\n"
-            )
-            for idx, entry in enumerate(api_leaderboard, start=1):
-                api_n = entry.get("api_name", "API")
-                score_val = entry.get("best_score", 0.0)
-                top_t = entry.get("top_title", "Article")[:65].replace("|", "-")
-                top_u = entry.get("top_url", "#")
-                if idx == 1:
-                    status_badge = "🏆 **SELECTED TO ANSWER**"
-                    rank_badge = "🥇 **1**"
-                    api_label = f"**{api_n}**"
-                    score_label = f"**`{score_val}`**"
-                elif idx == 2:
-                    status_badge = "*Evaluated (Runner-up)*"
-                    rank_badge = "🥈 2"
-                    api_label = api_n
-                    score_label = f"`{score_val}`"
-                elif idx == 3:
-                    status_badge = "*Evaluated*"
-                    rank_badge = "🥉 3"
-                    api_label = api_n
-                    score_label = f"`{score_val}`"
-                else:
-                    status_badge = "*Evaluated*"
-                    rank_badge = f"{idx}"
-                    api_label = api_n
-                    score_label = f"`{score_val}`"
 
-                evidence_md += f"| {rank_badge} | {api_label} | {score_label} | {status_badge} | [{top_t}]({top_u}) |\n"
-            evidence_md += "\n---\n\n"
-        else:
-            evidence_md += (
-                "| # | External Source Platform | Official Article / Investigation Title | Scientific Stance | Direct Source Article Link |\n"
-                "|:---:|---|---|:---:|---|\n"
+    # ── Helper: Format relevant excerpt sentences into highlighted markdown ──
+    def _format_relevant_excerpt(item: dict, header_prefix: str = "") -> str:
+        """Builds a highlighted markdown block showing the exact article sentences
+        that are most relevant to the claim, ranked by per-sentence cosine similarity."""
+        excerpts = item.get("relevant_excerpt", [])
+        if not excerpts:
+            return ""
+        md = f"\n{header_prefix}### \U0001f4cc Exact Relevant Excerpt from Article\n\n"
+        for i, ex in enumerate(excerpts, start=1):
+            score_pct = f"{ex['score'] * 100:.1f}%"
+            md += (
+                f"> **Sentence {i}** (Cosine Match: `{ex['score']}` \u2248 {score_pct}):\n"
+                f"> *\"{ex['sentence']}\"*\n>\n"
             )
-            for i, itm in enumerate(retrieved, start=1):
-                src_name = itm.get("source", "External Medical API")
-                title_clean = itm.get("article_title", itm.get("claim_topic", "Clinical Investigation")).replace("|", "-")
-                url_clean = itm.get("url", "#")
-                stance_clean = f"`{itm.get('stance', 'N/A').upper()}`"
-                dom = itm.get("origin_domain") or (urllib.parse.urlparse(url_clean).netloc.replace("www.", "") if url_clean != "#" else "source")
-                evidence_md += f"| {i} | {src_name} | {title_clean} | {stance_clean} | [🔗 View on {dom} ↗]({url_clean}) |\n"
-            evidence_md += "\n---\n\n"
+        md += "\n"
+        return md
 
     # ── TOP RESULT HIGHLIGHT CARD (WINNING API SOURCE ARTICLE) ───────────────
     abstract_quoted = _quote_abstract(top_full_abstract)
     if is_live:
         evidence_md += (
-            f"### 📄 Official Source Article (Selected from Winning API: {winning_api_name} | Cosine Match: {winning_api_score})\n"
-            f"> 🏛️ **Winning API Provider**: `{winning_api_name}` (Highest Cosine Similarity)\n"
-            f"> 🔗 **Direct Official Article Link**: [{top_title}]({top_url})\n\n"
+            f"### \U0001f4c4 Official Source Article (Selected from Winning API: {winning_api_name} | Cosine Match: {winning_api_score})\n"
+            f"> \U0001f3db\ufe0f **Winning API Provider**: `{winning_api_name}` (Highest Cosine Similarity)\n"
+            f"> \U0001f517 **Direct Official Article Link**: [{top_title}]({top_url})\n\n"
         )
+
+    # Show the exact relevant excerpt from the top article right away
+    evidence_md += _format_relevant_excerpt(top_item)
 
     if verdict_data["verdict"] == "Supported":
         evidence_md += (
@@ -535,7 +516,10 @@ def verify_claim(claim: str, mode: str = "Curated Medical & Hinglish Dataset (4,
         evidence_md += f"| **🔗 Article Link** | [{article_title}]({item['url']}) |\n\n"
 
         if abstract_q:
-            evidence_md += f"**📄 Full Article Abstract**:\n\n> {abstract_q}\n\n"
+            evidence_md += f"**\U0001f4c4 Full Article Abstract**:\n\n> {abstract_q}\n\n"
+
+        # Show the exact relevant sentences from this article
+        evidence_md += _format_relevant_excerpt(item)
         evidence_md += "---\n"
 
     return (
