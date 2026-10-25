@@ -1,13 +1,26 @@
 """
 Health Claim Classifier Module
-Rule-based / keyword-driven domain classifier to ensure only health-related
-queries proceed to the RAG retrieval pipeline.
 
-Note: In future production iterations, this rule-based classifier can be replaced
-with a fine-tuned Clinical BioBERT or MuRIL text classifier.
+Uses a two-stage approach:
+  Stage 1 (Fast): lightweight keyword pre-check to ALLOW obvious health queries
+                  and REJECT obvious non-health topics (sports, finance, etc.)
+  Stage 2 (Semantic RAG): if a RAG engine is provided, the claim is embedded and
+                          matched against the evidence dataset. If the best cosine
+                          similarity exceeds SEMANTIC_THRESHOLD, it is classified
+                          as health-related – regardless of whether any keyword matched.
+
+This avoids hardcoding and makes classification data-driven. A query like
+"Pineapple reduces acidity" will score high similarity against acidity/gut-health
+records and will correctly pass.
 """
 
 import re
+from typing import Optional
+
+# ── SEMANTIC threshold ───────────────────────────────────────────────────────
+# Any query whose best evidence-dataset cosine similarity >= this value
+# is considered health-related.
+SEMANTIC_THRESHOLD = 0.30
 
 # ── HIGH-CONFIDENCE health keywords ─────────────────────────────────────────
 # These alone are strong enough to flag a claim as health-related
@@ -21,6 +34,22 @@ STRONG_HEALTH_KEYWORDS = {
     "cystitis", "eczema", "psoriasis", "acne", "migraine",
     "syndrome", "disorder", "tumor", "carcinoma", "lymphoma", "leukemia",
     "ulcer", "hernia", "cataract", "glaucoma", "meningitis",
+    # Symptoms and body signals
+    "acidity", "nausea", "vomiting", "diarrhea", "diarrhoea", "constipation",
+    "bloating", "indigestion", "heartburn", "reflux", "gerd",
+    "fatigue", "lethargy", "dizziness", "headache",
+    "swelling", "edema", "rash", "allergy", "allergies", "allergic",
+    "insomnia", "anxiety", "depression",
+    "breathlessness", "dyspnea", "palpitation", "palpitations",
+    # Body systems, organs, functions
+    "digestion", "digestive", "metabolism", "metabolic",
+    "immunity", "immune", "inflammation", "inflammatory",
+    "cardiovascular", "cardiac", "respiratory", "neurological", "hormonal",
+    "thyroid", "pancreas", "liver", "kidney", "kidneys", "lungs", "lung",
+    "colon", "bowel", "gut", "intestine", "intestinal",
+    "bone", "bones", "joint", "joints", "muscle", "muscles",
+    "blood", "heart", "brain", "spine", "nerve", "nerves",
+    "urinary", "lymph", "prostate", "ovarian", "uterine", "cervical", "spleen",
     # Medical interventions & products
     "vaccine", "vaccines", "vaccination", "antibiotic", "antibiotics",
     "chemotherapy", "chemo", "dialysis", "paxlovid", "insulin",
@@ -30,13 +59,9 @@ STRONG_HEALTH_KEYWORDS = {
     # Clinical / medical terms
     "clinical", "diagnosis", "prognosis", "biopsy", "mri", "xray",
     "ecg", "blood pressure", "cholesterol", "hemoglobin", "platelet",
-    "immune", "immunity", "inflammation", "antibody", "antigen",
-    "pathogen", "bacteria", "viral", "virus", "infection", "infections",
-    "symptom", "symptoms", "chronic", "acute", "benign", "malignant",
-    # Body systems & organs (medical context)
-    "blood", "heart", "lung", "lungs", "kidney", "liver", "prostate",
-    "urinary", "lymph", "thyroid", "pancreas", "spleen", "colon",
-    "ovarian", "uterine", "cervical",
+    "antibody", "antigen", "pathogen", "bacteria", "viral", "virus",
+    "infection", "infections", "symptom", "symptoms", "mortality", "death", "physical activity", "sedentary",
+    "chronic", "acute", "benign", "malignant",
     # Pregnancy / reproductive
     "pregnancy", "pregnant", "prenatal", "postnatal", "miscarriage",
     "fertility", "contraceptive",
@@ -44,27 +69,39 @@ STRONG_HEALTH_KEYWORDS = {
     "doctor", "doctors", "physician", "surgeon", "nurse", "pharmacist",
     "hospital", "hospitals", "clinic", "icu", "emergency",
     "patient", "patients",
+    # Foods / substances inherently health-focused
+    "probiotic", "prebiotic", "antioxidant", "omega",
+    "turmeric", "curcumin", "ginger",
     # Hinglish (strong medical terms)
     "bimari", "bimaari", "ilaj", "ilaaj", "dawa", "dawai",
     "aspatal", "khansi", "bukhar", "sehat", "dard",
     # Devanagari Hindi
     "कैंसर", "वैक्सीन", "टीका", "टीकाकरण", "दवा", "दवाई", "डॉक्टर", "अस्पताल",
     "बीमारी", "मधुमेह", "डायबिटीज", "बुखार", "एंटीबायोटिक", "कोविड", "स्वास्थ्य",
-    "इलाज", "उपचार", "वायरस", "खांसी", "संक्रमण", "गर्भावस्था", "रक्त", "दिल"
+    "इलाज", "उपचार", "वायरस", "खांसी", "संक्रमण", "गर्भावस्था", "रक्त", "दिल",
+    "पाचन", "अम्लता", "मतली",
 }
 
 # ── AMBIGUOUS keywords ──────────────────────────────────────────────────────
 # These are health-relevant BUT too generic to stand alone.
-# They only count if a HEALTH_CONTEXT_VERB or second strong keyword is also present.
+# They only count if a HEALTH_CONTEXT_VERB or second ambiguous/strong keyword is also present.
+# Uncertain cases without a keyword match fall through to semantic RAG stage.
 AMBIGUOUS_HEALTH_KEYWORDS = {
     "sugar", "pain", "cold", "cough", "sore", "sores", "blister", "blisters",
-    "skin", "gut", "stomach", "muscle", "joint", "joints", "knee", "back",
+    "skin", "stomach", "knee", "back",
     "mask", "masks", "soap", "hygiene", "sanitizer", "sanitize", "handwash",
     "herbal", "remedy", "remedies", "heal", "healing", "prevent", "prevention",
     "preventive", "relieve", "alleviate", "fever", "health", "disease", "diseases",
     "herpes", "lysine", "cbd", "cannabis", "cannabidiol",
     "tobacco", "smoking", "cigarette",
     "haldi", "doodh", "chot",  # Hinglish
+    # Common foods/substances in potential health context
+    "milk", "water", "lemon", "honey", "pineapple", "apple", "garlic",
+    "green tea", "coffee", "salt", "orange",
+    # Lifestyle and wellness terms
+    "weight", "diet", "nutrition", "nutritional", "calorie", "calories",
+    "exercise", "workout", "sleep", "stress", "mental",
+    "fiber", "fibre",
 }
 
 # ── Context verbs that signal a health claim ────────────────────────────────
@@ -93,6 +130,11 @@ HEALTH_CONTEXT_VERBS = {
     "protect", "protects",
     "linked", "associated", "correlation",
     "symptom", "symptoms",
+    "good", "bad",
+    "heals", "soothes", "relieves",
+    "good for", "bad for",
+    # Hindi/Hinglish verbs
+    "fayda", "nuksan", "thik",
 }
 
 # ── Hard nonsense / non-health signal words ─────────────────────────────────
@@ -100,79 +142,110 @@ HEALTH_CONTEXT_VERBS = {
 NONSENSE_SIGNALS = {
     "nasa", "rocket", "spaceship", "alien", "ufo", "planet", "galaxy",
     "sports", "football", "cricket", "basketball", "baseball",
-    "movie", "film", "cinema", "actor", "actress",
+    "ipl", "fifa", "nba", "nfl", "premier",  # sports leagues
+    "movie", "film", "cinema", "actor", "actress", "bollywood", "netflix",
     "bank", "money", "loan", "finance", "stock", "crypto", "bitcoin",
     "recipe", "cook", "cooking", "bake", "baking", "restaurant",
     "weather", "rain", "snow", "hurricane", "tornado",
     "politics", "government", "election", "vote", "parliament",
+    "minister", "president", "politician",
     "car", "drive", "driving", "traffic", "accident",
     "school", "college", "university", "exam", "study",
     "music", "song", "concert", "dance",
 }
 
 
-def is_health_related(text: str) -> bool:
+def _keyword_stage(text_lower: str, tokens: set) -> Optional[bool]:
+    """
+    Stage 1 fast keyword pre-check.
+    Returns True  → definitely health-related
+    Returns False → definitely NOT health-related
+    Returns None  → uncertain; let semantic stage decide
+    """
+    # Check strong health keywords (multi-word too)
+    strong_matches: set = tokens.intersection(STRONG_HEALTH_KEYWORDS)
+    for kw in STRONG_HEALTH_KEYWORDS:
+        if " " in kw and kw in text_lower:
+            strong_matches.add(kw)
+
+    # Add multi-word ambiguous keywords to token set
+    extended_tokens = set(tokens)
+    for kw in AMBIGUOUS_HEALTH_KEYWORDS:
+        if " " in kw and kw in text_lower:
+            extended_tokens.add(kw)
+
+    nonsense_matches = extended_tokens.intersection(NONSENSE_SIGNALS)
+    ambiguous_matches = extended_tokens.intersection(AMBIGUOUS_HEALTH_KEYWORDS)
+    health_verb_matches = extended_tokens.intersection(HEALTH_CONTEXT_VERBS)
+    # Multi-word health verbs
+    for hv in HEALTH_CONTEXT_VERBS:
+        if " " in hv and hv in text_lower:
+            health_verb_matches.add(hv)
+
+    if strong_matches:
+        generic_strong = {
+            "health", "disease", "diseases", "fever", "cough",
+            "infection", "infections",
+        }
+        non_generic_strong = strong_matches - generic_strong
+        if non_generic_strong:
+            return True
+        if not nonsense_matches or health_verb_matches:
+            return True
+
+    # Pure nonsense with no health words → reject immediately
+    if nonsense_matches and not ambiguous_matches and not strong_matches:
+        return False
+
+    # Ambiguous + health verb → pass
+    if ambiguous_matches and health_verb_matches:
+        return True
+
+    # Multiple ambiguous keywords alone → pass
+    if len(ambiguous_matches) >= 2:
+        return True
+
+    # Uncertain — let semantic stage handle it
+    return None
+
+
+def is_health_related(text: str, rag_engine=None) -> bool:
     """
     Evaluates whether the input claim is related to health or medicine.
 
-    Logic:
-    1. Extract tokens from the input.
-    2. If any STRONG_HEALTH_KEYWORD is matched → True (high confidence).
-    3. If an AMBIGUOUS_HEALTH_KEYWORD is matched:
-       a. But a NONSENSE_SIGNAL word is also present → False (incoherent, non-health context).
-       b. And a HEALTH_CONTEXT_VERB is present → True (genuine health claim with ambiguous word).
-       c. Otherwise → False (too vague to be a health claim).
-    4. No keywords matched → False.
+    Two-stage pipeline:
+    1. Fast keyword check (O(1)) — returns immediately when confident.
+    2. Semantic RAG check — only if rag_engine is provided and Stage 1 is uncertain.
+       Embeds the claim and retrieves the best match from the evidence dataset.
+       If cosine similarity >= SEMANTIC_THRESHOLD → health-related.
+
+    Parameters
+    ----------
+    text       : The user's input claim string.
+    rag_engine : Optional HealthcareRAGEngine instance. When provided, Stage 2
+                 semantic matching runs on uncertain cases instead of defaulting
+                 to False. This catches food/lifestyle/gut-health queries like
+                 "Pineapple reduces acidity" that have no strong keyword.
     """
     if not text or not isinstance(text, str):
         return False
 
     text_lower = text.lower().strip()
-
-    # Extract alphanumeric and Devanagari tokens
     tokens = set(re.findall(r"[\w\u0900-\u097F]+", text_lower))
 
-    # ── Step 1: Check for strong health keywords (standalone sufficient) ────
-    strong_matches = tokens.intersection(STRONG_HEALTH_KEYWORDS)
+    result = _keyword_stage(text_lower, tokens)
+    if result is not None:
+        return result
 
-    # Also check multi-word strong keywords (e.g., "blood pressure", "cold sore")
-    for kw in STRONG_HEALTH_KEYWORDS:
-        if " " in kw and kw in text_lower:
-            strong_matches.add(kw)
+    # ── Stage 2: Semantic RAG classification ────────────────────────────────
+    if rag_engine is not None:
+        try:
+            hits = rag_engine.retrieve_evidence(text, top_k=1)
+            if hits:
+                top_score = float(hits[0].get("similarity_score", 0.0))
+                return top_score >= SEMANTIC_THRESHOLD
+        except Exception as e:
+            print(f"[HealthClassifier] Semantic stage error: {e}")
 
-    if strong_matches:
-        # Even for strong matches, if there are nonsense signals and no
-        # health context verb, it might be a garbled/nonsense query
-        nonsense_matches = tokens.intersection(NONSENSE_SIGNALS)
-        health_verb_matches = tokens.intersection(HEALTH_CONTEXT_VERBS)
-        # Allow if strong match is a disease/condition name (not just generic "health")
-        generic_strong = {"health", "disease", "diseases", "fever", "cough", "infection", "infections"}
-        non_generic_strong = strong_matches - generic_strong
-        if non_generic_strong:
-            return True
-        if nonsense_matches and not health_verb_matches:
-            return False
-        return True
-
-    # ── Step 2: Check ambiguous health keywords ─────────────────────────────
-    ambiguous_matches = tokens.intersection(AMBIGUOUS_HEALTH_KEYWORDS)
-    if ambiguous_matches:
-        nonsense_matches = tokens.intersection(NONSENSE_SIGNALS)
-        health_verb_matches = tokens.intersection(HEALTH_CONTEXT_VERBS)
-
-        # If nonsense context detected → reject
-        if nonsense_matches:
-            return False
-
-        # Need a health context verb to confirm genuine health intent
-        if health_verb_matches:
-            return True
-
-        # Ambiguous keyword alone, no health verb, no nonsense → check for
-        # at least 2 ambiguous keywords (more likely a health discussion)
-        if len(ambiguous_matches) >= 2:
-            return True
-
-        return False
-
+    # No RAG engine and keyword stage was uncertain → conservative reject
     return False

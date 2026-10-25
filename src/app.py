@@ -27,13 +27,13 @@ try:
     from src.preprocessing import preprocess_text
     from src.language_detector import detect_language
     from src.health_classifier import is_health_related
-    from src.rag_engine import HealthcareRAGEngine
+    from src.rag_engine import HealthcareRAGEngine, ExternalHealthcareRAGEngine
     from src.verdict_engine import assess_verdict_and_risk, generate_explanation
 except ModuleNotFoundError:
     from preprocessing import preprocess_text
     from language_detector import detect_language
     from health_classifier import is_health_related
-    from rag_engine import HealthcareRAGEngine
+    from rag_engine import HealthcareRAGEngine, ExternalHealthcareRAGEngine
     from verdict_engine import assess_verdict_and_risk, generate_explanation
 
 # Default dataset path
@@ -41,6 +41,7 @@ DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "evidence_d
 
 # Global RAG Engine instance (lazy-loaded on first use)
 _rag_engine = None
+_live_rag_engine = None
 
 
 def get_rag_engine():
@@ -52,8 +53,22 @@ def get_rag_engine():
     return _rag_engine
 
 
-def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_source: str = "", top_url: str = "", top_title: str = "", claim: str = "") -> str:
+def get_live_rag_engine():
+    """Creates the external-only live RAG engine without opening the local dataset."""
+    global _live_rag_engine
+    if _live_rag_engine is None:
+        print("Initializing external-only Live RAG Engine...")
+        _live_rag_engine = ExternalHealthcareRAGEngine()
+    return _live_rag_engine
+
+def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_source: str = "", top_url: str = "", top_title: str = "", claim: str = "", retrieval_mode: str = "") -> str:
     """Generates a high-impact, visual status banner with direct article link buttons and claim details."""
+    is_live_mode = "Live" in retrieval_mode
+    mode_badge = (
+        "🌐 Retrieval Mode: <strong>LIVE — External APIs only (PubMed Central, Europe PMC, ClinicalTrials.gov, WHO)</strong>"
+        if is_live_mode else
+        "🗂️ Retrieval Mode: <strong>CURATED — Local clinical evidence dataset</strong>"
+    )
     article_link_btn = ""
     if top_url and top_url != "#":
         article_link_btn = f"""
@@ -187,8 +202,13 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
     # Step 5: Detect Language
     lang = detect_language(claim)
 
-    # Step 6: Health Classification
-    health_flag = is_health_related(cleaned_claim)
+# Live mode uses only the keyword guardrail; it never opens the local dataset.
+    if "Live" in mode:
+        engine = None
+        health_flag = is_health_related(cleaned_claim)
+    else:
+        engine = get_rag_engine()
+        health_flag = is_health_related(cleaned_claim, rag_engine=engine)
 
     if not health_flag:
         verdict_data = {
@@ -199,7 +219,7 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
             "stance": "none"
         }
         explanation = generate_explanation(claim, lang, False, verdict_data, [])
-        banner_html = generate_verdict_banner("Non-Health Claim", "None", claim=claim)
+        banner_html = generate_verdict_banner("Non-Health Claim", "None", claim=claim, retrieval_mode=mode)
         return (
             banner_html,
             lang,
@@ -211,10 +231,9 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
             explanation["disclaimer"]
         )
 
-    # Step 7: Retrieve Evidence via FAISS / Dense Vector Index (Local vs. Live API)
-    engine = get_rag_engine()
+# Live mode ranks only records fetched from external APIs.
     if "Live" in mode:
-        retrieved = engine.retrieve_live_evidence(cleaned_claim, top_k=3)
+        retrieved = get_live_rag_engine().retrieve_live_evidence(cleaned_claim, top_k=3)
     else:
         retrieved = engine.retrieve_evidence(cleaned_claim, top_k=3)
 
@@ -256,8 +275,9 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
         top_author=top_author,
         top_source=top_source,
         top_url=top_url,
-        top_title=top_title,
-        claim=claim
+top_title=top_title,
+        claim=claim,
+        retrieval_mode=mode
     )
 
     # ── Format Evidence Markdown with full abstracts in apostrophes ──────────
@@ -396,7 +416,7 @@ def create_demo():
             """
             # 🩺 Multilingual Healthcare Misinformation Verifier (Live & Local RAG)
             Verify medical claims across **English**, **Hindi (हिंदी)**, and **Hinglish** using cross-lingual dense semantic retrieval.
-            Supports both **Curated Medical Claims & Hinglish Dataset (4,946 Clinical Records from HealthVer, HealthFC, MEDIQ, and Hinglish Corpus)** and **Live Real-Time Web Retrieval (NCBI PubMed Central & WHO APIs)**.
+            Supports both **Curated Medical Claims & Hinglish Dataset (4,946 Clinical Records from HealthVer, HealthFC, MEDIQ, and Hinglish Corpus)** and **Live Real-Time Web Retrieval (PubMed Central, Europe PMC, ClinicalTrials.gov & WHO APIs)**.
             """
         )
 
@@ -471,8 +491,6 @@ def create_demo():
 
 
 if __name__ == "__main__":
-    print("Pre-loading Multilingual RAG Engine on main thread...")
-    get_rag_engine()
-    print("RAG Engine ready! Launching web interface...")
+    print("Launching web interface; each retrieval engine loads only when its mode is selected...")
     demo = create_demo()
     demo.launch(server_name="127.0.0.1", server_port=7860, share=False)

@@ -163,20 +163,10 @@ class HealthcareRAGEngine:
         cleaned_claim = preprocess_text(claim)
         live_articles = fetch_live_clinical_evidence(cleaned_claim)
 
-        # Check for matching doctor-verified clinical trial records in vetted Cochrane database
-        try:
-            local_matches = self.retrieve_evidence(claim, top_k=2)
-            for loc in local_matches:
-                if loc.get("similarity_score", 0.0) >= 0.38:
-                    loc_copy = dict(loc)
-                    loc_copy["origin"] = "Medizin Transparent / Cochrane Evidence"
-                    live_articles.insert(0, loc_copy)
-        except Exception as e:
-            print(f"[RAGEngine] Local hybrid notice: {e}")
-
+        # Live mode must remain source-pure: curated evidence is only a fallback when live APIs return nothing.
         if not live_articles:
-            # Fallback to local dataset if offline or API returns no hits
-            return self.retrieve_evidence(claim, top_k=top_k)
+            # Strict live mode: never substitute curated data for unavailable external evidence.
+            return []
 
         # Encode live retrieved texts dynamically
         live_texts = [a["evidence_text"] for a in live_articles]
@@ -208,7 +198,10 @@ class HealthcareRAGEngine:
         results = []
         for rank, (score, idx) in enumerate(zip(scores[0], indices[0])):
             item = dict(live_articles[idx])
-            item["similarity_score"] = float(round(float(score), 4))
+            semantic_score = float(round(float(score), 4))
+            correlation_bonus = float(item.get("correlation_score", 0.0))
+            item["semantic_similarity_score"] = semantic_score
+            item["similarity_score"] = float(round(semantic_score + correlation_bonus, 4))
             item["rank"] = rank + 1
 
             # If stance is already established from curated dataset, preserve it
@@ -246,5 +239,56 @@ class HealthcareRAGEngine:
 
             results.append(item)
 
+        # Keep semantically strong results, but prefer evidence that names the same condition/intervention.
+        results.sort(key=lambda item: item.get("similarity_score", 0.0), reverse=True)
+        for rank, item in enumerate(results, start=1):
+            item["rank"] = rank
         return results
 
+
+
+class ExternalHealthcareRAGEngine:
+    """Live-only RAG engine. It never loads, indexes, or searches the local evidence dataset."""
+
+    def __init__(self, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = SentenceTransformer(model_name, device=self.device)
+
+    @staticmethod
+    def _infer_stance(item: dict) -> str:
+        text = " ".join([
+            item.get("evidence_text", ""), item.get("claim_topic", ""),
+            item.get("clinical_explanation", ""),
+        ]).lower()
+        if any(term in text for term in ("ineffective", "no effect", "harmful", "toxic", "does not cure", "does not treat", "does not prevent")):
+            return "refutes"
+        if any(term in text for term in ("unproven", "insufficient evidence", "not proven", "inconclusive", "unclear", "further research", "limited evidence", "conflicting evidence")):
+            return "uncertain"
+        if any(term in text for term in ("effective", "effectiveness", "reduces", "beneficial", "protective", "prevention", "efficacy", "randomized controlled trial")):
+            return "supports"
+        return "uncertain"
+
+    def retrieve_live_evidence(self, claim: str, top_k: int = 3):
+        cleaned_claim = preprocess_text(claim)
+        articles = fetch_live_clinical_evidence(cleaned_claim)
+        if not articles:
+            return []
+
+        texts = [item.get("evidence_text", "") for item in articles]
+        embeddings = np.asarray(self.model.encode(texts, normalize_embeddings=True, show_progress_bar=False, device=self.device), dtype=np.float32)
+        query_embedding = np.asarray(self.model.encode([cleaned_claim], normalize_embeddings=True, show_progress_bar=False, device=self.device), dtype=np.float32)[0]
+        scores = np.dot(embeddings, query_embedding)
+
+        results = []
+        for item, semantic_score in zip(articles, scores):
+            result = dict(item)
+            result["semantic_similarity_score"] = float(round(float(semantic_score), 4))
+            result["similarity_score"] = float(round(float(semantic_score) + float(result.get("correlation_score", 0.0)), 4))
+            if result.get("stance") not in {"supports", "refutes", "uncertain"}:
+                result["stance"] = self._infer_stance(result)
+            results.append(result)
+
+        results.sort(key=lambda item: item["similarity_score"], reverse=True)
+        for rank, item in enumerate(results[:top_k], start=1):
+            item["rank"] = rank
+        return results[:top_k]

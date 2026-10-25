@@ -72,12 +72,8 @@ def strip_html_tags(text: str) -> str:
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean
 
-
 def expand_medical_query(query: str) -> str:
-    """
-    Expands colloquial health terms and Hinglish expressions into formal
-    biomedical nomenclature for PubMed and medical API queries.
-    """
+    """Expands colloquial and Hinglish health terms into biomedical terminology."""
     clean = query.strip()
     clean = re.sub(r"\bcorona\b(?!\s*virus)", "coronavirus COVID-19", clean, flags=re.IGNORECASE)
     clean = re.sub(r"\bmask\b(?!s)", "face mask respiratory protection", clean, flags=re.IGNORECASE)
@@ -93,8 +89,9 @@ def expand_medical_query(query: str) -> str:
     clean = re.sub(r"\bbimari\b|\bbimaari\b", "disease illness", clean, flags=re.IGNORECASE)
     clean = re.sub(r"\bkhansi\b", "cough respiratory", clean, flags=re.IGNORECASE)
     clean = re.sub(r"\bbukhar\b", "fever", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bsore\s+throat\b", "sore throat pharyngitis", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\bgale\s+(?:ki|ka)\s+kharash\b", "sore throat pharyngitis", clean, flags=re.IGNORECASE)
     return clean
-
 
 def _safe_fetch(url: str, timeout: int = 8) -> bytes:
     """Makes a safe HTTP GET request with a custom User-Agent."""
@@ -320,8 +317,15 @@ def fetch_live_clinical_evidence(query: str, max_articles: int = 4, **kwargs) ->
     pubmed_items = fetch_pubmed_evidence(query, max_results=max_k)
     combined.extend(pubmed_items)
 
-    # 2. Secondary: WHO Global Health Authority
-    if len(combined) < 3:
+    # 2. Broader biomedical literature index, including reviews and guideline-linked records.
+    combined.extend(fetch_europe_pmc_evidence(query, max_results=min(3, max_k)))
+
+    # 3. Trial registry: included as related context, never treated as proof of efficacy.
+    if len(combined) < 5:
+        combined.extend(fetch_clinical_trials_evidence(query, max_results=2))
+
+    # 4. Secondary: WHO Global Health Authority
+    if len(combined) < 5:
         who_items = fetch_who_evidence(query)
         combined.extend(who_items)
 
@@ -331,4 +335,132 @@ def fetch_live_clinical_evidence(query: str, max_articles: int = 4, **kwargs) ->
         if "similarity_score" not in item:
             item["similarity_score"] = 0.0
 
-    return combined
+    return _finalize_records(combined, query)
+
+CLINICAL_CONCEPTS = {
+    "sore throat": ("pharyngitis", "sore throat", "throat pain"),
+    "cough": ("cough", "tussis"),
+    "common cold": ("common cold", "upper respiratory infection"),
+    "turmeric": ("turmeric", "curcumin", "curcuma longa", "haldi"),
+    "diabetes": ("diabetes", "blood glucose", "glycemic"),
+    "blood pressure": ("hypertension", "blood pressure"),
+}
+QUERY_STOPWORDS = {
+    "can", "does", "do", "is", "are", "the", "a", "an", "my", "your",
+    "for", "to", "of", "and", "or", "with", "in", "on", "by", "it",
+    "fix", "help", "cure", "treat", "prevent", "reduce", "cause", "causes",
+}
+
+
+
+def _query_concepts(query: str) -> set:
+    """Extract condition/intervention concepts used to reject weakly-related matches."""
+    query_lower = query.lower()
+    concepts = set()
+    for label, aliases in CLINICAL_CONCEPTS.items():
+        if any(alias in query_lower for alias in aliases):
+            concepts.add(label)
+    concepts.update(token for token in re.findall(r"[a-z]{4,}", query_lower) if token not in QUERY_STOPWORDS)
+    return concepts
+
+
+def _correlation_score(query: str, record: Dict[str, Any]) -> float:
+    """Reward evidence that explicitly mentions the claim's actual condition/intervention."""
+    concepts = _query_concepts(query)
+    corpus = " ".join([
+        record.get("article_title", ""), record.get("claim_topic", ""),
+        record.get("evidence_text", "")[:1800],
+    ]).lower()
+    matches = sum(any(alias in corpus for alias in CLINICAL_CONCEPTS.get(concept, (concept,))) for concept in concepts)
+    return round(min(0.30, 0.15 * matches), 3)
+
+
+def _finalize_records(records: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    """Deduplicate and rank sources by how directly they relate to the original claim."""
+    unique = {}
+    for item in records:
+        key = item.get("url") or item.get("article_title", "").lower()
+        if key and key not in unique:
+            item["correlation_score"] = _correlation_score(query, item)
+            unique[key] = item
+    ordered = sorted(unique.values(), key=lambda item: item.get("correlation_score", 0.0), reverse=True)
+    for rank, item in enumerate(ordered, start=1):
+        item["rank"] = rank
+        item.setdefault("similarity_score", 0.0)
+    return ordered
+
+def fetch_europe_pmc_evidence(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
+    """Fetch related peer-reviewed records from Europe PMC's public REST API."""
+    records = []
+    try:
+        clinical_query = urllib.parse.quote(expand_medical_query(query))
+        url = (
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search?"
+            f"query={clinical_query}&format=json&resultType=core&pageSize={max_results}"
+        )
+        data = json.loads(_safe_fetch(url, timeout=8).decode("utf-8", errors="ignore"))
+        for item in data.get("resultList", {}).get("result", []):
+            title = strip_html_tags(item.get("title", "")).strip()
+            abstract = strip_html_tags(item.get("abstractText", "")).strip()[:1200]
+            article_id = item.get("id", "")
+            source_id = item.get("source", "MED")
+            if not title or not article_id or any(noise in title.lower() for noise in NON_MEDICAL_NOISE):
+                continue
+            records.append({
+                "claim_topic": title,
+                "evidence_text": abstract or title,
+                "clinical_explanation": abstract or title,
+                "full_abstract": abstract,
+                "source": "Europe PMC",
+                "source_tier": "Tier 1 - Biomedical Literature Index",
+                "authors": item.get("authorString", "Peer-Reviewed Medical Researchers"),
+                "author_credentials": "Published Researchers (Europe PMC indexed)",
+                "article_title": title,
+                "journal": item.get("journalTitle", "Europe PMC indexed journal"),
+                "citation": item.get("journalTitle", "Europe PMC"),
+                "date": item.get("firstPublicationDate", item.get("pubYear", "")),
+                "url": f"https://europepmc.org/article/{source_id}/{article_id}",
+                "origin": "Europe PMC",
+                "stance": "",
+            })
+    except Exception as exc:
+        print(f"[LiveRetriever] Europe PMC fetch notice: {exc}")
+    return records
+
+
+def fetch_clinical_trials_evidence(query: str, max_results: int = 2) -> List[Dict[str, Any]]:
+    """Fetch related ClinicalTrials.gov studies as context, not efficacy evidence."""
+    records = []
+    try:
+        params = urllib.parse.urlencode({"query.term": expand_medical_query(query), "pageSize": max_results})
+        data = json.loads(_safe_fetch(f"https://clinicaltrials.gov/api/v2/studies?{params}", timeout=8).decode("utf-8", errors="ignore"))
+        for study in data.get("studies", []):
+            protocol = study.get("protocolSection", {})
+            ident = protocol.get("identificationModule", {})
+            status = protocol.get("statusModule", {})
+            desc = protocol.get("descriptionModule", {})
+            nct_id = ident.get("nctId", "")
+            title = ident.get("briefTitle", "").strip()
+            summary = desc.get("briefSummary", "").strip()
+            if not nct_id or not title:
+                continue
+            records.append({
+                "claim_topic": title,
+                "evidence_text": summary or f"Related registered clinical study: {title}",
+                "clinical_explanation": summary or "A related clinical study is registered; registry status is not proof of treatment effectiveness.",
+                "full_abstract": summary,
+                "source": "ClinicalTrials.gov",
+                "source_tier": "Tier 1 - NIH Clinical Trial Registry",
+                "authors": "ClinicalTrials.gov registered investigators",
+                "author_credentials": "Registered clinical-study investigators",
+                "article_title": title,
+                "journal": "ClinicalTrials.gov registry",
+                "citation": f"{nct_id} | {status.get('overallStatus', 'Status not listed')}",
+                "date": status.get("lastUpdateSubmitDate", ""),
+                "url": f"https://clinicaltrials.gov/study/{nct_id}",
+                "origin": "ClinicalTrials.gov",
+                "stance": "uncertain",
+            })
+    except Exception as exc:
+        print(f"[LiveRetriever] ClinicalTrials.gov fetch notice: {exc}")
+    return records
