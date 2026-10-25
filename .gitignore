@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
+*.log
+.env
+scratch/
+.system_generated/
+hinglish dataset/hinglish/
+
