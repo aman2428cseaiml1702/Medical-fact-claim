@@ -14,12 +14,29 @@ import json
 import time
 import urllib.parse
 import urllib.request
-from typing import List, Dict, Any
+import urllib.error
+import os
+from typing import List, Dict, Any, Optional
 
 
 # ── Trusted source registry ──────────────────────────────────────────────────
 # Each entry defines: display name, credibility tier, author label
 TRUSTED_SOURCES = {
+    "google_factcheck": {
+        "name": "Google Fact Check Tools",
+        "tier": "🥇 Tier 1 – Verified Fact-Checking Organization (IFCN Signatory)",
+        "author_label": "Certified Independent Fact-Checkers (Google Fact Check Tools)"
+    },
+    "europe_pmc": {
+        "name": "Europe PMC",
+        "tier": "🥇 Tier 1 – Biomedical Literature Index (EMBL-EBI)",
+        "author_label": "Peer-Reviewed Medical Researchers"
+    },
+    "clinical_trials": {
+        "name": "ClinicalTrials.gov",
+        "tier": "🥇 Tier 1 – NIH Clinical Trials Registry",
+        "author_label": "NIH Registered Clinical Investigators"
+    },
     "pubmed": {
         "name": "NCBI PubMed Central",
         "tier": "🥇 Tier 1 – Peer-Reviewed Journal",
@@ -91,6 +108,10 @@ def expand_medical_query(query: str) -> str:
     clean = re.sub(r"\bbukhar\b", "fever", clean, flags=re.IGNORECASE)
     clean = re.sub(r"\bsore\s+throat\b", "sore throat pharyngitis", clean, flags=re.IGNORECASE)
     clean = re.sub(r"\bgale\s+(?:ki|ka)\s+kharash\b", "sore throat pharyngitis", clean, flags=re.IGNORECASE)
+    # Filter out conversational Hinglish filler/stopwords before API query
+    hinglish_fillers = r"\b(?:ko|se|ka|ki|ke|hai|hain|karta|karti|karte|hota|hoti|hote|kya|kyu|kyun|mein|me|pe|par|bhi|aur|ya|toh|karo|karein|wali|wala|wale|kuch)\b"
+    clean = re.sub(hinglish_fillers, " ", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+", " ", clean).strip()
     return clean
 
 def _safe_fetch(url: str, timeout: int = 8) -> bytes:
@@ -104,6 +125,135 @@ def _safe_fetch(url: str, timeout: int = 8) -> bytes:
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+def fetch_google_factcheck_evidence(
+    query: str,
+    api_key: Optional[str] = None,
+    language_code: Optional[str] = None,
+    max_results: int = 4
+) -> List[Dict[str, Any]]:
+    """
+    Queries Google Fact Check Tools API (https://factchecktools.googleapis.com/v1alpha1/claims:search)
+    to find official claim reviews and fact checks published by certified fact-checking organizations
+    (e.g., Health Feedback, FactCheck.org, Snopes, Boom Live, Vishwas News, etc.).
+
+    Extracts:
+      - Direct official source article URL (review.get('url'))
+      - Fact-checking publisher name and website (review.get('publisher'))
+      - Official review title
+      - Exact textual rating ('False', 'True', 'Misleading', etc.)
+      - Standardized scientific stance ('refutes', 'supports', 'uncertain')
+    """
+    records = []
+    key = (
+        api_key
+        or os.environ.get("GOOGLE_FACTCHECK_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+    )
+    if not key or not str(key).strip():
+        print("[LiveRetriever] Note: Google Fact Check API key not configured. Set GOOGLE_FACTCHECK_API_KEY or input via UI to query Google Fact Check Tools.")
+        return records
+
+    try:
+        clean_q = query.strip()
+        params = {
+            "query": clean_q,
+            "key": key.strip(),
+            "pageSize": max_results,
+        }
+        if language_code:
+            params["languageCode"] = language_code
+
+        url = f"https://factchecktools.googleapis.com/v1alpha1/claims:search?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "HealthcareRAG-Research/2.0 (FactCheckTools)",
+                "Accept": "application/json"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+        claims = data.get("claims", [])
+        for claim_obj in claims:
+            claim_text = claim_obj.get("text", "").strip()
+            claimant = claim_obj.get("claimant", "Public Claim")
+            claim_date = claim_obj.get("claimDate", "")
+
+            reviews = claim_obj.get("claimReview", [])
+            for review in reviews:
+                pub_obj = review.get("publisher", {})
+                publisher_name = pub_obj.get("name", "Independent Fact-Checker")
+                publisher_site = pub_obj.get("site", "")
+                review_url = review.get("url", "").strip()
+                review_title = review.get("title", "").strip() or f"Fact Check: {claim_text}"
+                textual_rating = review.get("textualRating", "Unrated").strip()
+                review_date = review.get("reviewDate", claim_date)
+
+                if not review_url:
+                    continue
+
+                parsed = urllib.parse.urlparse(review_url)
+                origin_domain = parsed.netloc.replace("www.", "")
+
+                rating_lower = textual_rating.lower()
+                if any(term in rating_lower for term in [
+                    "false", "incorrect", "pants on fire", "fake", "distorted", "misleading",
+                    "disproven", "debunked", "hoax", "scam", "fabricated", "unfounded",
+                    "galat", "jhooth", "asatya", "wrong", "bogus", "myth"
+                ]):
+                    stance = "refutes"
+                elif any(term in rating_lower for term in [
+                    "true", "correct", "accurate", "verified", "sahi", "satya", "supported"
+                ]) and not any(term in rating_lower for term in ["partly", "half", "mostly false"]):
+                    stance = "supports"
+                else:
+                    stance = "uncertain"
+
+                evidence_summary = (
+                    f"Official Fact-Check Investigation by {publisher_name}. "
+                    f"Investigated Claim: \"{claim_text}\" (attributed to: {claimant}). "
+                    f"Verified Rating: \"{textual_rating}\". "
+                    f"Official Source Article: {review_url}"
+                )
+
+                citation = f"{publisher_name} ({review_date}): Rating '{textual_rating}'"
+
+                records.append({
+                    "claim_topic": review_title,
+                    "evidence_text": evidence_summary,
+                    "clinical_explanation": f"Independent fact-checking investigation by {publisher_name} evaluated this claim as '{textual_rating}'. Official source article: {review_url}",
+                    "full_abstract": evidence_summary,
+                    "source": f"Google Fact Check Tools ({publisher_name})",
+                    "source_tier": "🥇 Tier 1 – Verified Fact-Checking Organization (IFCN / Google Fact Check)",
+                    "authors": f"{publisher_name} Fact-Checking Team",
+                    "author_credentials": f"Certified Fact-Checker ({publisher_site or 'Google Fact Check Partner'})",
+                    "article_title": review_title,
+                    "journal": f"Fact Check Investigation ({publisher_name})",
+                    "citation": citation,
+                    "date": review_date,
+                    "doi": "",
+                    "url": review_url,
+                    "origin_domain": origin_domain,
+                    "origin": f"Google Fact Check Tools API ({publisher_name})",
+                    "stance": stance,
+                    "rating": textual_rating,
+                    "claimant": claimant
+                })
+    except urllib.error.HTTPError as he:
+        if he.code == 403:
+            print("[LiveRetriever] Google Fact Check API: HTTP 403 Forbidden (API key invalid or Fact Check Tools API not enabled).")
+        elif he.code == 400:
+            print(f"[LiveRetriever] Google Fact Check API: HTTP 400 Bad Request ({he.reason}).")
+        else:
+            print(f"[LiveRetriever] Google Fact Check API HTTP error {he.code}: {he.reason}")
+    except Exception as exc:
+        print(f"[LiveRetriever] Google Fact Check API fetch notice: {exc}")
+
+    return records
 
 
 def fetch_pubmed_abstract(pmc_id: str) -> str:
@@ -242,6 +392,7 @@ def fetch_pubmed_evidence(query: str, max_results: int = 4) -> List[Dict[str, An
                 "date": pub_date,
                 "doi": doi,
                 "url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{uid}/",
+                "origin_domain": "ncbi.nlm.nih.gov",
                 "origin": "PubMed Central (NCBI)",
                 "stance": ""  # filled by RAG engine via similarity
             })
@@ -292,6 +443,7 @@ def fetch_who_evidence(query: str) -> List[Dict[str, Any]]:
                 "date": "Current WHO Guidance",
                 "doi": "",
                 "url": link if link.startswith("http") else f"https://www.who.int{link}",
+                "origin_domain": "who.int",
                 "origin": "WHO (World Health Organization)",
                 "stance": ""
             })
@@ -312,6 +464,18 @@ def fetch_live_clinical_evidence(query: str, max_articles: int = 4, **kwargs) ->
     """
     max_k = kwargs.get("max_results", max_articles)
     combined = []
+
+    # 0. Google Fact Check Tools API (certified fact-check investigations)
+    google_api_key = kwargs.get("google_api_key") or kwargs.get("api_key")
+    language_code = kwargs.get("language_code") or kwargs.get("lang")
+    factcheck_items = fetch_google_factcheck_evidence(
+        query,
+        api_key=google_api_key,
+        language_code=language_code,
+        max_results=min(4, max_k)
+    )
+    if factcheck_items:
+        combined.extend(factcheck_items)
 
     # 1. Primary: PubMed Central (peer-reviewed journals with real abstracts)
     pubmed_items = fetch_pubmed_evidence(query, max_results=max_k)
@@ -420,6 +584,7 @@ def fetch_europe_pmc_evidence(query: str, max_results: int = 3) -> List[Dict[str
                 "citation": item.get("journalTitle", "Europe PMC"),
                 "date": item.get("firstPublicationDate", item.get("pubYear", "")),
                 "url": f"https://europepmc.org/article/{source_id}/{article_id}",
+                "origin_domain": "europepmc.org",
                 "origin": "Europe PMC",
                 "stance": "",
             })
@@ -458,6 +623,7 @@ def fetch_clinical_trials_evidence(query: str, max_results: int = 2) -> List[Dic
                 "citation": f"{nct_id} | {status.get('overallStatus', 'Status not listed')}",
                 "date": status.get("lastUpdateSubmitDate", ""),
                 "url": f"https://clinicaltrials.gov/study/{nct_id}",
+                "origin_domain": "clinicaltrials.gov",
                 "origin": "ClinicalTrials.gov",
                 "stance": "uncertain",
             })

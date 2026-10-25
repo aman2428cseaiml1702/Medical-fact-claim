@@ -21,6 +21,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+import urllib.parse
 import gradio as gr
 
 try:
@@ -61,13 +62,19 @@ def get_live_rag_engine():
         _live_rag_engine = ExternalHealthcareRAGEngine()
     return _live_rag_engine
 
-def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_source: str = "", top_url: str = "", top_title: str = "", claim: str = "", retrieval_mode: str = "") -> str:
+def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_source: str = "", top_url: str = "", top_title: str = "", claim: str = "", retrieval_mode: str = "", top_domain: str = "") -> str:
     """Generates a high-impact, visual status banner with direct article link buttons and claim details."""
     is_live_mode = "Live" in retrieval_mode
+    domain_label = f" ({top_domain})" if top_domain else ""
     mode_badge = (
-        "🌐 Retrieval Mode: <strong>LIVE — External APIs only (PubMed Central, Europe PMC, ClinicalTrials.gov, WHO)</strong>"
+        "<div style='font-size: 12px; margin-top: 8px; background: rgba(0,0,0,0.22); padding: 7px 12px; border-radius: 8px; border-left: 3px solid #38bdf8;'>"
+        "🌐 <strong>Live Real-Time Retrieval Mode Active:</strong> Verified exclusively via live external APIs (Google Fact Check Tools, PubMed Central, Europe PMC, ClinicalTrials.gov, WHO).<br/>"
+        "⚡ <em>Local 4k clinical dataset: <strong>BYPASSED (Zero local dataset used)</strong></em>"
+        "</div>"
         if is_live_mode else
-        "🗂️ Retrieval Mode: <strong>CURATED — Local clinical evidence dataset</strong>"
+        "<div style='font-size: 12px; margin-top: 8px; background: rgba(0,0,0,0.18); padding: 6px 12px; border-radius: 8px; border-left: 3px solid #10b981;'>"
+        "🗂️ <strong>Curated Mode Active:</strong> Dense semantic search over 4,946 peer-reviewed clinical records."
+        "</div>"
     )
     article_link_btn = ""
     if top_url and top_url != "#":
@@ -78,10 +85,10 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
             </div>
             <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
                 <div style="font-size: 13px;">
-                    <strong>📄 Official Article:</strong> <span>{top_title}</span>
+                    <strong>📄 Official Source Article:</strong> <span>{top_title}</span>
                 </div>
-                <a href="{top_url}" target="_blank" style="background: white; color: #0f172a; padding: 6px 14px; border-radius: 6px; font-weight: 700; font-size: 13px; text-decoration: none; box-shadow: 0 2px 6px rgba(0,0,0,0.25);">
-                    🌐 Open Official Article Page ↗
+                <a href="{top_url}" target="_blank" style="background: white; color: #0f172a; padding: 7px 16px; border-radius: 6px; font-weight: 700; font-size: 13px; text-decoration: none; box-shadow: 0 2px 6px rgba(0,0,0,0.25); display: inline-flex; align-items: center; gap: 6px;">
+                    🌐 Open Official Source Article{domain_label} ↗
                 </a>
             </div>
         </div>
@@ -148,6 +155,25 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
             {article_link_btn}
         </div>
         """
+    elif "No relevant" in verdict or "Inconclusive" in verdict:
+        return f"""
+        <div style="background: linear-gradient(135deg, #475569 0%, #64748b 100%); color: white; padding: 20px 24px; border-radius: 12px; margin-bottom: 16px; box-shadow: 0 8px 24px rgba(71, 85, 105, 0.35); border: 2px solid #94a3b8;">
+            <div style="font-size: 21px; font-weight: 800; display: flex; align-items: center; gap: 10px;">
+                <span>🔍 CLINICAL VERDICT: NO DIRECT EVIDENCE FOUND</span>
+            </div>
+            <div style="font-size: 15px; margin-top: 8px; line-height: 1.5; opacity: 0.96;">
+                No conclusive peer-reviewed evidence or clinical trials directly substantiate or refute this claim in external medical repositories.
+            </div>
+            <div style="margin-top: 14px; display: flex; flex-wrap: wrap; gap: 10px; font-size: 13px; font-weight: 600; background: rgba(0,0,0,0.18); padding: 8px 14px; border-radius: 8px;">
+                <span>⚡ Risk Level: <strong>{risk.upper()}</strong></span>
+                <span>•</span>
+                <span>📑 Evidence Status: <strong>NO DIRECT MATCHES</strong></span>
+                <span>•</span>
+                <span>🧑‍⚕️ Evaluated by: <strong>{top_author or 'Clinical RAG Engine'}</strong></span>
+            </div>
+            {article_link_btn}
+        </div>
+        """
     elif "Non-Health" in verdict:
         display_claim = claim if claim else "your query"
         return f"""
@@ -173,7 +199,7 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
     return ""
 
 
-def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)"):
+def verify_claim(claim: str, mode: str = "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", google_api_key: str = ""):
     """
     Orchestrates the 10-step verification workflow with dual-mode support:
     1. Local Curated Dataset (750 Clinical Records)
@@ -202,10 +228,24 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
     # Step 5: Detect Language
     lang = detect_language(claim)
 
-# Live mode uses only the keyword guardrail; it never opens the local dataset.
+    # Live mode never accesses or loads the 4k local clinical dataset.
     if "Live" in mode:
         engine = None
         health_flag = is_health_related(cleaned_claim)
+        # If keyword stage was uncertain, probe live external APIs directly.
+        # This allows valid food/health claims to proceed without touching the local dataset.
+        if not health_flag:
+            try:
+                probe = get_live_rag_engine().retrieve_live_evidence(
+                    cleaned_claim,
+                    top_k=1,
+                    google_api_key=google_api_key,
+                    language_code=lang
+                )
+                if probe and probe[0].get("similarity_score", 0.0) >= 0.25:
+                    health_flag = True
+            except Exception:
+                pass
     else:
         engine = get_rag_engine()
         health_flag = is_health_related(cleaned_claim, rag_engine=engine)
@@ -231,9 +271,14 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
             explanation["disclaimer"]
         )
 
-# Live mode ranks only records fetched from external APIs.
+    # In Live mode, only external APIs are queried. The 4k local dataset is completely bypassed.
     if "Live" in mode:
-        retrieved = get_live_rag_engine().retrieve_live_evidence(cleaned_claim, top_k=3)
+        retrieved = get_live_rag_engine().retrieve_live_evidence(
+            cleaned_claim,
+            top_k=4,
+            google_api_key=google_api_key,
+            language_code=lang
+        )
     else:
         retrieved = engine.retrieve_evidence(cleaned_claim, top_k=3)
 
@@ -269,19 +314,45 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
         return f'"{t}"'
 
     # Generate visual verdict banner with direct link button
+    # Extract top domain
+    top_domain = top_item.get("origin_domain", "")
+    if not top_domain and top_url and top_url != "#":
+        try:
+            top_domain = urllib.parse.urlparse(top_url).netloc.replace("www.", "")
+        except Exception:
+            top_domain = ""
+
     banner_html = generate_verdict_banner(
         verdict_data["verdict"],
         verdict_data["risk"],
         top_author=top_author,
         top_source=top_source,
         top_url=top_url,
-top_title=top_title,
+        top_title=top_title,
         claim=claim,
-        retrieval_mode=mode
+        retrieval_mode=mode,
+        top_domain=top_domain
     )
 
     # ── Format Evidence Markdown with full abstracts in apostrophes ──────────
     evidence_md = ""
+    is_live = "Live" in mode
+
+    if is_live:
+        evidence_md += (
+            "### 🌐 Live External Evidence Sources (Fetched in Real-Time)\n"
+            "> ⚡ **100% External Retrieval**: All evidence below was dynamically retrieved in real-time from external APIs (**Google Fact Check Tools**, **NCBI PubMed Central**, **Europe PMC**, **ClinicalTrials.gov**, **WHO**). The local 4,946 clinical dataset was **NOT used**.\n\n"
+            "| # | External Source Platform | Official Article / Investigation Title | Scientific Stance | Direct Source Article Link |\n"
+            "|:---:|---|---|:---:|---|\n"
+        )
+        for i, itm in enumerate(retrieved, start=1):
+            src_name = itm.get("source", "External Medical API")
+            title_clean = itm.get("article_title", itm.get("claim_topic", "Clinical Investigation")).replace("|", "-")
+            url_clean = itm.get("url", "#")
+            stance_clean = f"`{itm.get('stance', 'N/A').upper()}`"
+            dom = itm.get("origin_domain") or (urllib.parse.urlparse(url_clean).netloc.replace("www.", "") if url_clean != "#" else "source")
+            evidence_md += f"| {i} | {src_name} | {title_clean} | {stance_clean} | [🔗 View on {dom} ↗]({url_clean}) |\n"
+        evidence_md += "\n---\n\n"
 
     # ── TOP RESULT HIGHLIGHT CARD ────────────────────────────────────────────
     abstract_quoted = _quote_abstract(top_full_abstract)
@@ -361,6 +432,16 @@ top_title=top_title,
             f"> **🔗 Clinical Investigation**: [{top_title}]({top_url})\n\n"
             f"---\n\n"
         )
+    else:
+        evidence_md += (
+            f"### 🔍 CLINICAL EVIDENCE STATUS: {verdict_data.get('verdict', 'INCONCLUSIVE').upper()}\n\n"
+            f"> **🔎 Investigated Claim**: *\"{claim}\"*\n>\n"
+            f"> **🔬 Clinical Summary**:\n"
+            f"> {top_explanation or 'No direct conclusive clinical studies found matching this exact query.'}\n>\n"
+        )
+        if top_url and top_url != "#":
+            evidence_md += f"> **🔗 Related Source Article**: [{top_title}]({top_url})\n\n"
+        evidence_md += "---\n\n"
 
     # ── ALL RETRIEVED ARTICLES (ranked list with full abstracts) ─────────────
     evidence_md += f"### 📚 All Retrieved Clinical Articles [{mode}]\n\n"
@@ -425,30 +506,37 @@ def create_demo():
                 mode_selector = gr.Radio(
                     choices=[
                         "Curated Medical & Hinglish Dataset (4,946 Clinical Records)",
-                        "Live Real-Time Retrieval (PubMed Central & Medical APIs)"
+                        "Live Real-Time External APIs (Google Fact Check, PubMed, Europe PMC, ClinicalTrials, WHO)"
                     ],
                     value="Curated Medical & Hinglish Dataset (4,946 Clinical Records)",
                     label="Select Retrieval Engine Mode"
                 )
                 claim_input = gr.Textbox(
                     label="Enter Health Claim",
-                    placeholder="e.g., Can masks reduce corona infections / sugar khane se diabetes hota hai",
+                    placeholder="e.g., Can masks reduce corona infections / sugar khane se diabetes hota hai / Pineapple reduces acidity",
                     lines=3,
                 )
+                with gr.Accordion("🔑 Google Fact Check API Key (Optional)", open=False):
+                    google_key_input = gr.Textbox(
+                        label="Google Fact Check Tools API Key",
+                        placeholder="AIzaSy... (leave blank to query PubMed, Europe PMC, ClinicalTrials.gov, WHO)",
+                        type="password",
+                        info="Optional. Enables real-time verification across IFCN certified fact-checkers (Health Feedback, Snopes, PolitiFact, Vishwas News, Boom Live). Can also be configured via GOOGLE_FACTCHECK_API_KEY environment variable."
+                    )
                 verify_btn = gr.Button("🔍 Verify Claim", variant="primary", size="lg")
 
                 gr.Markdown("### 💡 Click Any Example Below to Verify Instantly")
                 examples_ui = gr.Examples(
                     examples=[
-                        ["Can masks reduce corona infections when worn by a large proportion of the population?", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)"],
-                        ["sugar khane se diabetes hota hai", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)"],
-                        ["kya turmeric se cancer theek ho sakta hai", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)"],
-                        ["Does paxlovid protect unvaccinated people with risk factors from severe or even fatal covid 19 disease?", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)"],
-                        ["Can vinegar help in preventing COVID-19?", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)"],
-                        ["Haldi doodh cancer ko theek karta hai", "Live Real-Time Retrieval (PubMed Central & Medical APIs)"],
-                        ["can eating sugar causes nasa to run", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)"],
+                        ["Can masks reduce corona infections when worn by a large proportion of the population?", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
+                        ["sugar khane se diabetes hota hai", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
+                        ["kya turmeric se cancer theek ho sakta hai", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
+                        ["Does paxlovid protect unvaccinated people with risk factors from severe or even fatal covid 19 disease?", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
+                        ["Can vinegar help in preventing COVID-19?", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
+                        ["Haldi doodh cancer ko theek karta hai", "Live Real-Time External APIs (Google Fact Check, PubMed, Europe PMC, ClinicalTrials, WHO)", ""],
+                        ["Pineapple reduces acidity", "Live Real-Time External APIs (Google Fact Check, PubMed, Europe PMC, ClinicalTrials, WHO)", ""],
                     ],
-                    inputs=[claim_input, mode_selector],
+                    inputs=[claim_input, mode_selector, google_key_input],
                 )
 
             with gr.Column(scale=3):
@@ -472,7 +560,7 @@ def create_demo():
                 disclaimer_output = gr.Markdown(label="Disclaimer")
 
         # Hook up both button click and Enter key submit
-        verify_inputs = [claim_input, mode_selector]
+        verify_inputs = [claim_input, mode_selector, google_key_input]
         verify_outputs = [
             verdict_banner,
             lang_output,

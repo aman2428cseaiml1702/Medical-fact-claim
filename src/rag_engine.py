@@ -155,13 +155,13 @@ class HealthcareRAGEngine:
 
         return results
 
-    def retrieve_live_evidence(self, claim: str, top_k: int = 3):
+    def retrieve_live_evidence(self, claim: str, top_k: int = 3, google_api_key: str = None, language_code: str = None):
         """
         Dynamically fetches live clinical papers & articles from PubMed and Wikipedia APIs,
         combines them with gold-standard Cochrane clinical records, and ranks them by semantic similarity.
         """
         cleaned_claim = preprocess_text(claim)
-        live_articles = fetch_live_clinical_evidence(cleaned_claim)
+        live_articles = fetch_live_clinical_evidence(cleaned_claim, max_articles=top_k, google_api_key=google_api_key, language_code=language_code)
 
         # Live mode must remain source-pure: curated evidence is only a fallback when live APIs return nothing.
         if not live_articles:
@@ -268,9 +268,9 @@ class ExternalHealthcareRAGEngine:
             return "supports"
         return "uncertain"
 
-    def retrieve_live_evidence(self, claim: str, top_k: int = 3):
+    def retrieve_live_evidence(self, claim: str, top_k: int = 3, google_api_key: str = None, language_code: str = None):
         cleaned_claim = preprocess_text(claim)
-        articles = fetch_live_clinical_evidence(cleaned_claim)
+        articles = fetch_live_clinical_evidence(cleaned_claim, max_articles=top_k, google_api_key=google_api_key, language_code=language_code)
         if not articles:
             return []
 
