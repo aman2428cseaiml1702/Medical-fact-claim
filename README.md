@@ -3,14 +3,14 @@
 A clinical misinformation verification system utilizing **Retrieval-Augmented Generation (RAG)** across **English**, **Hindi (हिंदी)**, and **Hinglish**.
 
 This repository is the **Dual-Mode Live edition**, featuring both:
-1. **Mode 1: Curated Clinical Dataset (750 Records)** — Offline benchmark derived from *Medizin Transparent* and Cochrane-affiliated randomized controlled trials for deterministic, fast (<5ms) evaluations.
+1. **Mode 1: Curated Clinical Dataset (8,694 Records)** — Comprehensive multi-source clinical benchmark combining *Medizin Transparent* / Cochrane trials (750 records), *HealthVer* peer-reviewed evidence (5,000 records), *MEDIQ* clinical hospital Q&A (2,000 records), and *Hinglish Health Knowledgebase* (944 records) for deterministic, fast (<5ms) evaluations.
 2. **Mode 2: Live Real-Time Retrieval (PubMed Central & Medical Consensus APIs)** — Real-time dynamic fetch of biomedical literature directly from the US National Library of Medicine (PubMed/NCBI) and Wikipedia Medical Consensus APIs, vectorized on-the-fly into an ephemeral in-memory FAISS index.
 
 ---
 
 ## 🌟 Project Highlights
 
-- **Dual-Mode Architecture**: Seamlessly switch between the 750-record curated clinical dataset and live real-time web retrieval via PubMed Central.
+- **Dual-Mode Architecture**: Seamlessly switch between the 8,694-record curated clinical dataset and live real-time web retrieval via PubMed Central.
 - **On-The-Fly FAISS Indexing**: Dynamically downloads open-access PMC study abstracts, generates 384-D dense embeddings via `paraphrase-multilingual-MiniLM-L12-v2`, and builds an ephemeral inner-product FAISS index in under 1ms.
 - **Cross-Lingual Dense Semantic Retrieval**: Aligns Hinglish (Romanized Hindi) and Devanagari Hindi queries with English medical literature.
 - **Data Preprocessing Pipeline**: NFKC Unicode normalization, Devanagari script preservation (`\u0900-\u097F`), and Hinglish phonetic variant normalization (`thik` → `theek`, `dawa` → `dawai`).
@@ -30,7 +30,7 @@ multilingual-healthcare-rag-live/
 ├── data/
 │   ├── Datensatz_raw.csv                              # Original Datensatz source dataset (750 records)
 │   ├── eda_summary_plots.png                          # 3-panel EDA statistical visualization
-│   └── evidence_dataset.csv                           # 750 standardized clinical evidence records with URLs
+│   └── evidence_dataset.csv                           # 8,694 standardized clinical evidence records with URLs
 ├── src/
 │   ├── __init__.py
 │   ├── eda.py                                        # Exploratory Data Analysis & statistical plotting script
@@ -63,7 +63,7 @@ python3 src/app.py
 Open your browser at: **`http://127.0.0.1:7860`**
 
 ### 3. Using the Dual-Mode Selector in the UI:
-- **Curated Dataset (750 Clinical Records)**: Fast, deterministic verification against the offline Cochrane/Medizin Transparent database.
+- **Curated Dataset (8,694 Clinical Records)**: Fast, deterministic verification against the 8,694 multi-source clinical database.
 - **Live Real-Time Retrieval (PubMed Central & Medical APIs)**: Queries PubMed Central in real-time, vectorizes articles on-the-fly, and verifies any novel health claim with live `ncbi.nlm.nih.gov` links!
 
 ---

@@ -219,7 +219,7 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
 def verify_claim(claim: str, mode: str = "Curated Medical & Hinglish Dataset (8,694 Clinical Records)", google_api_key: str = ""):
     """
     Orchestrates the 10-step verification workflow with dual-mode support:
-    1. Local Curated Dataset (750 Clinical Records)
+    1. Local Curated Dataset (8,694 Clinical Records)
     2. Live Real-Time Retrieval (PubMed Central & Medical Consensus APIs)
     """
     if not claim or not claim.strip():
