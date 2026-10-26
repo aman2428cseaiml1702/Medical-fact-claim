@@ -155,8 +155,8 @@ try:
         })
         count_hv += 1
 
-        # Cap HealthVer to top 3,000 diverse rows to keep embedding balance high
-        if count_hv >= 3000:
+        # Expand HealthVer to 5,000 diverse peer-reviewed rows
+        if count_hv >= 5000:
             break
 
     print(f"Loaded {count_hv} records from HealthVer.")
@@ -198,10 +198,19 @@ try:
             continue
         seen_texts.add(evidence_text)
 
+        # Clinically assess stance from advisory answer
+        al = a.lower()
+        if any(w in al for w in ["do not", "avoid", "harmful", "side effects", "mat lo", "nahi khana", "manaa"]):
+            mq_stance = "refutes"
+        elif any(w in al for w in ["uncertain", "not proven", "consult doctor", "varies", "depends"]):
+            mq_stance = "uncertain"
+        else:
+            mq_stance = "supports"
+
         unified_rows.append({
             "claim_topic": q,
             "evidence_text": evidence_text,
-            "stance": "supports",
+            "stance": mq_stance,
             "source": "King George's Medical University Clinical Knowledge (MEDIQ)",
             "source_tier": "Tier 1: Government Medical University & Hospital",
             "author_credentials": "Professors & Chief Medical Officers, KGMU",
@@ -214,7 +223,8 @@ try:
             "language": lang
         })
         count_mq += 1
-        if count_mq >= 800:
+        # Expand MEDIQ to 2,000 clinical Q&A records
+        if count_mq >= 2000:
             break
     print(f"Loaded {count_mq} records from MEDIQ.")
 except Exception as e:
@@ -232,7 +242,7 @@ except Exception:
 print("\n[4/4] Processing Hinglish Health Dataset...")
 try:
     if os.path.exists(HINGLISH_TSV_PATH):
-        df_hinglish = pd.read_csv(HINGLISH_TSV_PATH, sep="\t", on_bad_lines="skip", nrows=100000)
+        df_hinglish = pd.read_csv(HINGLISH_TSV_PATH, sep="\t", on_bad_lines="skip", nrows=250000)
         print("Hinglish TSV total loaded rows:", len(df_hinglish))
 
         # Filter specifically for authentic health/medical mentions
@@ -240,7 +250,8 @@ try:
             "cancer", "diabetes", "sugar", "heart", "infection", "dawa", "dawai",
             "treatment", "ilaj", "doctor", "hospital", "bimari", "vaccine", "teeka",
             "corona", "covid", "fever", "bukhar", "blood pressure", "bp", "dard",
-            "pet dard", "sehat", "swasthya", "ayurved", "homeopathy", "kidney", "liver"
+            "pet dard", "sehat", "swasthya", "ayurved", "homeopathy", "kidney", "liver",
+            "aankh", "skin", "allergy", "cough", "khansi", "sar dard"
         ]
         pattern = "|".join([r"\b" + kw + r"\b" for kw in health_kw])
         matches = df_hinglish[df_hinglish["text"].astype(str).str.contains(pattern, case=False, regex=True, na=False)]
@@ -250,7 +261,7 @@ try:
         for _, row in matches.iterrows():
             text = str(row["text"]).strip()
             script = str(row.get("script", "roman")).strip()
-            if len(text) < 30 or len(text) > 400:
+            if len(text) < 25 or len(text) > 450:
                 continue
 
             # Skip social media toxic / political arguments
@@ -264,9 +275,9 @@ try:
 
             # Determine stance based on content
             tl = text.lower()
-            if any(w in tl for w in ["sahi", "fayda", "theek", "labh", "proven", "effective", "bachav"]):
+            if any(w in tl for w in ["sahi", "fayda", "theek", "labh", "proven", "effective", "bachav", "madad"]):
                 stance = "supports"
-            elif any(w in tl for w in ["nuksan", "khatarnaak", "galat", "jhooth", "fake", "harmful", "side effect"]):
+            elif any(w in tl for w in ["nuksan", "khatarnaak", "galat", "jhooth", "fake", "harmful", "side effect", "mat karna", "khatra"]):
                 stance = "refutes"
             else:
                 stance = "uncertain"
@@ -287,7 +298,8 @@ try:
                 "language": "hinglish" if script == "roman" else "hi"
             })
             count_hg += 1
-            if count_hg >= 500:
+            # Expand Hinglish to 1,200 health knowledge rows
+            if count_hg >= 1200:
                 break
         print(f"Added {count_hg} curated Hinglish health records.")
     else:

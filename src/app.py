@@ -216,7 +216,7 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
     return ""
 
 
-def verify_claim(claim: str, mode: str = "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", google_api_key: str = ""):
+def verify_claim(claim: str, mode: str = "Curated Medical & Hinglish Dataset (8,694 Clinical Records)", google_api_key: str = ""):
     """
     Orchestrates the 10-step verification workflow with dual-mode support:
     1. Local Curated Dataset (750 Clinical Records)
@@ -554,10 +554,10 @@ def create_demo():
             with gr.Column(scale=2):
                 mode_selector = gr.Radio(
                     choices=[
-                        "Curated Medical & Hinglish Dataset (4,946 Clinical Records)",
+                        "Curated Medical & Hinglish Dataset (8,694 Clinical Records)",
                         "Live Real-Time External APIs (Google Fact Check, PubMed, Europe PMC, ClinicalTrials, WHO)"
                     ],
-                    value="Curated Medical & Hinglish Dataset (4,946 Clinical Records)",
+                    value="Curated Medical & Hinglish Dataset (8,694 Clinical Records)",
                     label="Select Retrieval Engine Mode"
                 )
                 claim_input = gr.Textbox(
@@ -577,11 +577,11 @@ def create_demo():
                 gr.Markdown("### 💡 Click Any Example Below to Verify Instantly")
                 examples_ui = gr.Examples(
                     examples=[
-                        ["Can masks reduce corona infections when worn by a large proportion of the population?", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
-                        ["sugar khane se diabetes hota hai", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
-                        ["kya turmeric se cancer theek ho sakta hai", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
-                        ["Does paxlovid protect unvaccinated people with risk factors from severe or even fatal covid 19 disease?", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
-                        ["Can vinegar help in preventing COVID-19?", "Curated Medical & Hinglish Dataset (4,946 Clinical Records)", ""],
+                        ["Can masks reduce corona infections when worn by a large proportion of the population?", "Curated Medical & Hinglish Dataset (8,694 Clinical Records)", ""],
+                        ["sugar khane se diabetes hota hai", "Curated Medical & Hinglish Dataset (8,694 Clinical Records)", ""],
+                        ["kya turmeric se cancer theek ho sakta hai", "Curated Medical & Hinglish Dataset (8,694 Clinical Records)", ""],
+                        ["Does paxlovid protect unvaccinated people with risk factors from severe or even fatal covid 19 disease?", "Curated Medical & Hinglish Dataset (8,694 Clinical Records)", ""],
+                        ["Can vinegar help in preventing COVID-19?", "Curated Medical & Hinglish Dataset (8,694 Clinical Records)", ""],
                         ["Haldi doodh cancer ko theek karta hai", "Live Real-Time External APIs (Google Fact Check, PubMed, Europe PMC, ClinicalTrials, WHO)", ""],
                         ["Pineapple reduces acidity", "Live Real-Time External APIs (Google Fact Check, PubMed, Europe PMC, ClinicalTrials, WHO)", ""],
                     ],
